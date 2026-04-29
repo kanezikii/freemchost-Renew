@@ -24,30 +24,33 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: scripts
 
-      # ── 3. 安装 GOST ───────────────────────────────────────────
-      - name: Install GOST v2.11.5
-        run: |
-          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
-          gunzip gost-linux-amd64-2.11.5.gz
-          chmod +x gost-linux-amd64-2.11.5
-          sudo mv gost-linux-amd64-2.11.5 /usr/local/bin/gost
-          gost -V
-
-      # ── 4. 启动 GOST（bash 判断变量是否为空，规避 secrets 上下文限制）
-      - name: Start GOST HTTP proxy
+      # ── 3. 安装并启动 Xray (替换原有的 GOST) ─────────────────────────
+      - name: Setup and Start Xray
         env:
-          PROXY_NODE: ${{ secrets.GUPPY_PROXY_NODE }}
+          XRAY_CONFIG: ${{ secrets.XRAY_CONFIG_JSON }}
         run: |
-          if [ -n "$PROXY_NODE" ]; then
-            gost -L http://127.0.0.1:8080 -F "$PROXY_NODE" &
+          if [ -n "$XRAY_CONFIG" ]; then
+            # 下载 Xray core
+            wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+            unzip -q Xray-linux-64.zip -d xray_bin
+            chmod +x xray_bin/xray
+            
+            # 写入配置
+            echo "$XRAY_CONFIG" > config.json
+            
+            # 后台启动 Xray
+            nohup ./xray_bin/xray run -c config.json > xray.log 2>&1 &
             sleep 3
-            echo "GOST started, HTTP proxy at 127.0.0.1:8080"
-            curl -s --proxy http://127.0.0.1:8080 --max-time 10 https://www.google.com -o /dev/null \
+            
+            # Xray 配置中本地监听端口为 10808 (mixed)
+            echo "Xray started, HTTP/SOCKS proxy at 127.0.0.1:10808"
+            curl -s --proxy http://127.0.0.1:10808 --max-time 10 https://www.google.com -o /dev/null \
               && echo "Proxy OK" || echo "Proxy check failed (continuing anyway)"
-            echo "GOST_HTTP_PROXY=http://127.0.0.1:8080" >> $GITHUB_ENV
+              
+            echo "HTTP_PROXY=http://127.0.0.1:10808" >> $GITHUB_ENV
+            echo "HTTPS_PROXY=http://127.0.0.1:10808" >> $GITHUB_ENV
           else
-            echo "No proxy configured, skipping GOST"
-            echo "GOST_HTTP_PROXY=" >> $GITHUB_ENV
+            echo "No proxy configured, skipping Xray"
           fi
 
       # ── 5. 安装系统依赖 ────────────────────────────────────────
