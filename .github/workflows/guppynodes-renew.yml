@@ -30,25 +30,19 @@ jobs:
           XRAY_CONFIG: ${{ secrets.XRAY_CONFIG_JSON }}
         run: |
           if [ -n "$XRAY_CONFIG" ]; then
-            # 下载 Xray core
             wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
             unzip -q Xray-linux-64.zip -d xray_bin
             chmod +x xray_bin/xray
             
-            # 写入配置
             echo "$XRAY_CONFIG" > config.json
-            
-            # 后台启动 Xray
             nohup ./xray_bin/xray run -c config.json > xray.log 2>&1 &
             sleep 3
             
-            # Xray 配置中本地监听端口为 10808 (mixed)
             echo "Xray started, HTTP/SOCKS proxy at 127.0.0.1:10808"
             curl -s --proxy http://127.0.0.1:10808 --max-time 10 https://www.google.com -o /dev/null \
               && echo "Proxy OK" || echo "Proxy check failed (continuing anyway)"
               
-            echo "HTTP_PROXY=http://127.0.0.1:10808" >> $GITHUB_ENV
-            echo "HTTPS_PROXY=http://127.0.0.1:10808" >> $GITHUB_ENV
+            # 注意：这里删除了写入 $GITHUB_ENV 的两行代码
           else
             echo "No proxy configured, skipping Xray"
           fi
