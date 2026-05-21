@@ -96,9 +96,11 @@ jobs:
           GUPPY_PASSWORD:  ${{ secrets.GUPPY_PASSWORD }}
           TG_BOT_TOKEN:    ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID:      ${{ secrets.TG_CHAT_ID }}
-          # GOST_HTTP_PROXY 已由步骤4写入 $GITHUB_ENV，此处自动继承
+          # 在这里单独指定代理，不影响前面的 pip 安装
+          HTTP_PROXY:      http://127.0.0.1:10808
+          HTTPS_PROXY:     http://127.0.0.1:10808
         run: |
-          python scripts/guppynodes_renew.py
+          python scripts/scripts/guppynodes_renew.py
 
       # ── 10. 上传截图（失败时排查）────────────────────────────
       - name: Upload screenshots
