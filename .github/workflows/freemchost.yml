@@ -14,8 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      NODE_LINK: ${{ secrets.NODE_LINK }}
-
+      NODE_LINK: ${{ secrets.NODE_LINK || (startsWith(secrets.PROXY_URL, 'vmess://') || startsWith(secrets.PROXY_URL, 'vless://') || startsWith(secrets.PROXY_URL, 'trojan://') || startsWith(secrets.PROXY_URL, 'hy2://') || startsWith(secrets.PROXY_URL, 'hysteria2://')) && secrets.PROXY_URL || '' }}
+  
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
@@ -195,7 +195,8 @@ jobs:
           SERVER_PAGE_URL: ${{ secrets.SERVER_PAGE_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          PROXY_URL: ${{ secrets.PROXY_URL || (env.NODE_LINK != '' && 'socks5://127.0.0.1:7891' || '') }}
+          # 如果启动了内核则固定走本地 7891，否则使用原生 PROXY_URL
+          PROXY_URL: ${{ env.NODE_LINK != '' && 'socks5://127.0.0.1:7891' || secrets.PROXY_URL }}
         run: node renew.js
 
       - name: 上传运行截图
