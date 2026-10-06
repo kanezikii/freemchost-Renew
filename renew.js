@@ -21,7 +21,7 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-// 🛡️ 深度清理所有弹窗、Cookie 协议横幅及半透明遮罩
+// 🛡️ 深度清理评分/反馈弹窗、Cookie 协议横幅及半透明遮罩
 async function closeAllModals(page) {
   // 1. 处理底部 Cookie 授权横幅
   try {
@@ -43,7 +43,6 @@ async function closeAllModals(page) {
     }
 
     await page.evaluate(() => {
-      // 点击右上角 ×
       document.querySelectorAll('button, svg, [role="button"]').forEach(el => {
         const txt = (el.textContent || '').trim();
         const aria = (el.getAttribute('aria-label') || '').toLowerCase();
@@ -52,11 +51,11 @@ async function closeAllModals(page) {
         }
       });
 
-      // 强力卸载阻挡点击的遮罩 DOM
+      // 仅移除评分与反馈遮罩，不误删续期弹窗
       const overlays = document.querySelectorAll('[role="dialog"], div.fixed.inset-0, div[class*="backdrop"]');
       overlays.forEach(el => {
         const txt = el.innerText || '';
-        if (txt.includes('FreeMCHost') || txt.includes('idea') || txt.includes('rate') || txt.includes('feedback')) {
+        if (txt.includes('How would you rate') || txt.includes('Got an idea')) {
           el.remove();
         }
       });
@@ -67,7 +66,7 @@ async function closeAllModals(page) {
   }
 }
 
-// 🕒 精准提取剩余时间 (如: 01天 07小时 56分钟)
+// 🕒 精准提取剩余时间 (如: 01天 07小时 50分钟)
 async function getExpiryTimeText(page) {
   try {
     const result = await page.evaluate(() => {
@@ -205,22 +204,18 @@ function parseTimeToHours(timeStr) {
     }
 
     console.log('📌 正在切换至 [PLAN / Billing] 选项卡...');
-    
-    // 精准锁定 Radix UI 选项卡 Button 元素（匹配 role="tab" 且包含 billing 或 id 含有 trigger-billing）
     const billingTabLocator = page.locator('button[role="tab"]').filter({ hasText: /billing/i }).first();
     await billingTabLocator.waitFor({ state: 'attached', timeout: 15000 });
 
     for (let retry = 1; retry <= 3; retry++) {
       await closeAllModals(page);
 
-      // 双重触发：Playwright 原生点击 + evaluate 原生 JS 点击
       await billingTabLocator.click({ force: true }).catch(() => {});
       await page.evaluate(() => {
         const tab = document.querySelector('button[role="tab"][id*="trigger-billing"], button[role="tab"][aria-controls*="billing"]');
         if (tab) tab.click();
       });
 
-      // 验证是否已成功激活 Billing 视图 (检测页面中出现 "TIME UNTIL EXPIRY" 或 "Plan & lifecycle")
       const isActivated = await page.waitForFunction(() => {
         const text = document.body.innerText || '';
         return text.includes('TIME UNTIL EXPIRY') || text.includes('Plan & lifecycle');
@@ -235,58 +230,131 @@ function parseTimeToHours(timeStr) {
 
     await page.waitForTimeout(1500);
 
-    // 🕒 获取并计算续期前的时间
+    // 🕒 获取续期前的初始时间
     const currentExpiryTime = await getExpiryTimeText(page);
     const beforeHours = parseTimeToHours(currentExpiryTime);
     console.log(`📌 抓取到的当前服务器剩余时间: ${currentExpiryTime} (约 ${beforeHours} 小时)`);
 
-    // 检测是否未到续期时间
-    const isLocked = await page.evaluate(() => {
-      const txt = document.body.innerText || '';
-      return txt.includes('46h before expiry') || txt.includes('come back later');
+    // 🔄 寻找并点击红色 [Renew now] 按钮 (DOM 穿透原生点击)
+    console.log('🔄 正在寻找并点击红色 [Renew now] 按钮...');
+    const renewClicked = await page.evaluate(() => {
+      const all = Array.from(document.querySelectorAll('button, a, div[role="button"], div, span'));
+      for (const el of all) {
+        const txt = (el.innerText || '').trim();
+        if (/renew now/i.test(txt)) {
+          const btn = el.closest('button') || el.closest('a') || el.closest('[role="button"]') || el;
+          const rect = btn.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            btn.click();
+            return true;
+          }
+        }
+      }
+      return false;
     });
 
-    if (isLocked) {
-      const notTimeMsg = `⏳ <b>Freemchost 尚未到续期时间</b>\n\n必须在到期前 46 小时内开放免费续期。\n📌 当前服务器剩余时间: <b>${currentExpiryTime}</b>`;
+    if (!renewClicked) {
+      const renewFallback = page.locator(':is(button, a, div, span):visible').filter({ hasText: /Renew now/i }).last();
+      await renewFallback.waitFor({ state: 'visible', timeout: 10000 });
+      await renewFallback.click({ force: true });
+    }
+    console.log('👉 已成功点击 [Renew now] 按钮！');
+
+    // ⏳ 等待续期选择弹窗 ("Keep your server online") 彻底加载
+    console.log('⏳ 等待续期选项弹窗加载...');
+    await page.waitForSelector('text=/Keep your server online/i, text=/336 hours/i, text=/60 hours/i', { timeout: 15000 });
+    await page.waitForTimeout(1500);
+
+    // 🔍 检查第三个选项 [60 hours] 的状态 (是否处于不可选或冷却中)
+    const option3Status = await page.evaluate(() => {
+      const allNodes = Array.from(document.querySelectorAll('*'));
+      const targetText = allNodes.find(el => {
+        const txt = (el.textContent || '').trim();
+        return /60\s*hours/i.test(txt) && el.children.length === 0;
+      });
+
+      if (!targetText) return { found: false, isLocked: true, reason: '未找到 60 hours 选项' };
+
+      // 向上定位第三个选项的外层卡片容器
+      let card = targetText;
+      for (let i = 0; i < 5; i++) {
+        if (card.parentElement && (
+          card.parentElement.getAttribute('role') === 'button' ||
+          card.parentElement.tagName === 'BUTTON' ||
+          card.parentElement.className.includes('rounded')
+        )) {
+          card = card.parentElement;
+          if (card.tagName === 'BUTTON' || card.getAttribute('role') === 'button') break;
+        }
+      }
+
+      const cardText = (card.innerText || '').toLowerCase();
+      const style = window.getComputedStyle(card);
+      const isLocked = cardText.includes('come back later') ||
+                       cardText.includes('before expiry') ||
+                       card.hasAttribute('disabled') ||
+                       card.getAttribute('aria-disabled') === 'true' ||
+                       style.pointerEvents === 'none' ||
+                       style.cursor === 'not-allowed' ||
+                       card.className.includes('opacity-50') ||
+                       card.className.includes('cursor-not-allowed');
+
+      return {
+        found: true,
+        isLocked: isLocked,
+        cardText: card.innerText
+      };
+    });
+
+    console.log(`📋 第三个选项识别结果: 存在=${option3Status.found}, 是否锁定/不可选=${option3Status.isLocked}`);
+
+    if (option3Status.isLocked) {
+      const notTimeMsg = `⏳ <b>Freemchost 尚未到续期开放时间</b>\n\n第三个选项 (60 hours) 当前不可选（平台提示需在到期前开放或正处于冷却）。\n📌 当前服务器剩余时间: <b>${currentExpiryTime}</b>`;
       console.log('⚠️ ' + notTimeMsg.replace(/<[^>]+>/g, ''));
+      await page.screenshot({ path: 'screenshots/renew_locked.png' });
       await sendTelegramMessage(tgToken, tgChatId, notTimeMsg);
       await browser.close();
       return;
     }
 
-    console.log('🔄 正在寻找并点击红色 [Renew now] 按钮...');
-    const renewBtn = page.getByRole('button', { name: /Renew now/i }).first();
-    await renewBtn.waitFor({ state: 'visible', timeout: 15000 });
-    await renewBtn.click({ force: true });
-    console.log('👉 已点击 [Renew now] 按钮！');
-
-    await page.waitForTimeout(3000);
-
-    console.log('📋 正在寻找并强制点击 [60 hours] 续期选项...');
-    const hours60Option = page.locator('text=/60 hours/i').first();
-    await hours60Option.waitFor({ state: 'visible', timeout: 10000 });
-    
-    await hours60Option.evaluate(el => {
-      const btn = el.closest('button') || el.closest('div[role="button"]') || el;
-      btn.click();
+    // 🎯 可选状态：点击第三个选项进行续期
+    console.log('👉 第三个选项可用，正在点击 [60 hours] 进行续期...');
+    await page.evaluate(() => {
+      const allNodes = Array.from(document.querySelectorAll('*'));
+      const targetText = allNodes.find(el => /60\s*hours/i.test(el.textContent || '') && el.children.length === 0);
+      if (targetText) {
+        const btn = targetText.closest('button') || targetText.closest('[role="button"]') || targetText.closest('div[class*="rounded"]') || targetText;
+        btn.click();
+      }
     });
-    console.log('👉 已触发 [60 hours] 点击事件！');
 
-    console.log('⏳ 等待平台处理续期请求...');
-    await page.waitForTimeout(8000); 
+    // 检查是否有二级确认按钮（如 Confirm / Renew）
+    const confirmBtn = page.locator('button:visible').filter({ hasText: /^(confirm|renew|continue)$/i }).first();
+    if (await confirmBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+      console.log('👉 触发二级确认按钮...');
+      await confirmBtn.click();
+    }
 
-    // 🕒 重新获取并严格校验时间
+    console.log('⏳ 等待平台处理续期请求并刷新数据...');
+    await page.waitForTimeout(8000);
+
+    // 确保弹窗关闭后重新抓取最新的倒计时数据
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(1500);
+
+    // 🕒 读取续期后的新剩余时间
     const updatedExpiryTime = await getExpiryTimeText(page);
     const afterHours = parseTimeToHours(updatedExpiryTime);
-    console.log(`📌 再次抓取服务器剩余时间: ${updatedExpiryTime} (约 ${afterHours} 小时)`);
+    console.log(`📌 续期后抓取的剩余时间: ${updatedExpiryTime} (约 ${afterHours} 小时)`);
 
     await page.screenshot({ path: 'screenshots/renew_result.png', fullPage: true });
 
+    // 校验时间是否成功延长
     if (afterHours <= beforeHours || afterHours === 0) {
-      throw new Error(`平台未响应续期请求，剩余时间未发生改变 (仍为 ${updatedExpiryTime})。可能按钮点击未生效或存在风控。`);
+      throw new Error(`平台处理完毕后剩余时间未见增加 (原: ${currentExpiryTime}, 现: ${updatedExpiryTime})，可能点击未触发或需手动确认。`);
     }
 
-    const successMsg = `🎉 <b>Freemchost 服务器已成功续期！</b>\n\n📌 续期后剩余时间: <b>${updatedExpiryTime}</b>`;
+    const successMsg = `🎉 <b>Freemchost 服务器已成功续期！</b>\n\n📌 续期前剩余时间: <b>${currentExpiryTime}</b>\n📌 续期后剩余时间: <b>${updatedExpiryTime}</b>`;
     console.log('✅ ' + successMsg.replace(/<[^>]+>/g, ''));
     await sendTelegramMessage(tgToken, tgChatId, successMsg);
 
