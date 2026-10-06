@@ -21,39 +21,30 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-// 🛡️ 启动常驻弹窗监听：自动物理清除评分、反馈弹窗及遮罩，但保留续期选项弹窗
-async function enableAutoPopupKiller(page) {
-  await page.evaluate(() => {
-    if (window.__popupKillerActive) return;
-    window.__popupKillerActive = true;
+// 🛡️ 温和关闭评分与 Cookie 弹窗（使用 React 原生事件，杜绝 DOM 强删崩溃）
+async function safelyDismissUnwantedPopups(page) {
+  try {
+    // 1. 发送 Escape 原生快捷键关闭对话框
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(300);
 
-    setInterval(() => {
-      // 1. 查找并直接物理移除评分与建议弹窗
-      document.querySelectorAll('*').forEach(el => {
-        const txt = el.innerText || '';
-        if (txt.includes('How would you rate') || txt.includes('Got an idea') || txt.includes('Your feedback')) {
-          const modal = el.closest('[role="dialog"]') || el.closest('.fixed') || el;
-          if (modal && !modal.innerText.includes('Keep your server online')) {
-            try { modal.remove(); } catch (e) {}
-          }
-        }
-      });
+    // 2. 如果出现评分/反馈弹窗，点击 Maybe later
+    const maybeLater = page.locator(':is(button, a, div[role="button"]):visible').filter({ hasText: /^maybe later$/i }).first();
+    if (await maybeLater.isVisible({ timeout: 600 }).catch(() => false)) {
+      await maybeLater.click({ force: true });
+      await page.waitForTimeout(500);
+    }
 
-      // 2. 清理阻挡点击的背景遮罩（排除续期弹窗自身的容器）
-      document.querySelectorAll('div.fixed.inset-0, div[class*="backdrop"]').forEach(backdrop => {
-        if (!backdrop.innerText.includes('Keep your server online') && !backdrop.innerText.includes('336 hours')) {
-          try { backdrop.remove(); } catch (e) {}
-        }
-      });
-
-      // 恢复滚动与点击事件
-      document.body.style.overflow = 'auto';
-      document.body.style.pointerEvents = 'auto';
-    }, 300);
-  });
+    // 3. 处理 Cookie 横幅
+    const cookieBtn = page.locator('button:visible').filter({ hasText: /^(accept all|reject all)$/i }).first();
+    if (await cookieBtn.isVisible({ timeout: 600 }).catch(() => false)) {
+      await cookieBtn.click({ force: true });
+      await page.waitForTimeout(300);
+    }
+  } catch (e) {}
 }
 
-// 🕒 精准提取剩余时间 (如: 03天 19小时 42分钟)
+// 🕒 精准提取剩余时间 (如: 03天 19小时 37分钟)
 async function getExpiryTimeText(page) {
   try {
     const result = await page.evaluate(() => {
@@ -178,22 +169,16 @@ function parseTimeToHours(timeStr) {
     }
 
     await page.waitForTimeout(2000);
-    // 启用自动弹窗清除
-    await enableAutoPopupKiller(page);
+    await safelyDismissUnwantedPopups(page);
 
-    // 检查并自动接受 Cookie
-    const cookieBtn = page.locator('button').filter({ hasText: /^(accept all|reject all)$/i }).first();
-    if (await cookieBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-      await cookieBtn.click({ force: true });
-    }
-
-    // 检查是否有配置更新卡片
+    // 检查是否有配置更新卡片 (Offer update)
     const updateOfferBtn = page.getByRole('button', { name: /Update to current offer/i }).first();
     if (await updateOfferBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
       console.log('⚡ 检测到配置需要更新，正在点击 [Update to current offer]...');
       await updateOfferBtn.click();
       await page.waitForLoadState('networkidle');
       await page.waitForTimeout(2500);
+      await safelyDismissUnwantedPopups(page);
     }
 
     console.log('📌 正在切换至 [PLAN / Billing] 选项卡...');
@@ -201,6 +186,7 @@ function parseTimeToHours(timeStr) {
     await billingTabLocator.waitFor({ state: 'attached', timeout: 15000 });
 
     for (let retry = 1; retry <= 3; retry++) {
+      await safelyDismissUnwantedPopups(page);
       await billingTabLocator.click({ force: true }).catch(() => {});
       await page.evaluate(() => {
         const tab = document.querySelector('button[role="tab"][id*="trigger-billing"], button[role="tab"][aria-controls*="billing"]');
@@ -220,6 +206,7 @@ function parseTimeToHours(timeStr) {
     }
 
     await page.waitForTimeout(1500);
+    await safelyDismissUnwantedPopups(page);
 
     // 🕒 获取续期前的当前时间
     const currentExpiryTime = await getExpiryTimeText(page);
@@ -227,119 +214,63 @@ function parseTimeToHours(timeStr) {
     console.log(`📌 抓取到的当前服务器剩余时间: ${currentExpiryTime} (约 ${beforeHours} 小时)`);
 
     // 🔄 点击红色 [Renew now] 按钮
-    console.log('🔄 正在寻找并点击红色 [Renew now] 按钮...');
-    await page.evaluate(() => {
-      const all = Array.from(document.querySelectorAll('button, a, [role="button"], div, span'));
-      for (const el of all) {
-        if (/renew now/i.test((el.innerText || '').trim())) {
-          const btn = el.closest('button') || el.closest('[role="button"]') || el;
-          btn.scrollIntoView();
-          btn.click();
-          return;
-        }
-      }
-    });
+    console.log('🔄 正在点击红色 [Renew now] 按钮...');
+    const renewBtn = page.locator('button').filter({ hasText: /Renew now/i }).first();
+    await renewBtn.waitFor({ state: 'visible', timeout: 10000 });
+    await renewBtn.scrollIntoViewIfNeeded();
+    await renewBtn.click({ force: true });
+    console.log('👉 已点击 [Renew now] 按钮！');
 
-    // 兜底再次触发点击
-    const renewFallback = page.locator(':is(button, [role="button"], a):visible').filter({ hasText: /Renew now/i }).last();
-    if (await renewFallback.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await renewFallback.click({ force: true });
-    }
-    console.log('👉 已触发 [Renew now] 点击事件！');
-
-    // ⏳ 等待续期选项弹窗 ("Keep your server online") 渲染完成
+    // ⏳ 等待续期选项弹窗 ("Keep your server online") 打开
     console.log('⏳ 等待续期选项弹窗加载...');
-    await page.waitForFunction(() => {
-      const txt = document.body.innerText || '';
-      return txt.includes('Keep your server online') || txt.includes('60 hours') || txt.includes('336 hours');
-    }, { timeout: 15000 });
-    await page.waitForTimeout(1500);
+    const renewDialog = page.locator('[role="dialog"]').filter({ hasText: /Keep your server online/i });
+    await renewDialog.waitFor({ state: 'visible', timeout: 15000 });
+    await page.waitForTimeout(1000);
 
-    // 🔍 检查第三个选项 [60 hours] 的可选状态
-    const option3Status = await page.evaluate(() => {
-      const allNodes = Array.from(document.querySelectorAll('*'));
-      const hours60 = allNodes.find(el => {
-        const txt = (el.textContent || '').trim();
-        return /60\s*hours/i.test(txt) && el.children.length === 0;
-      });
+    // 🔍 检查弹窗中的第三个选项（60 hours）状态
+    const modalContent = await renewDialog.innerText();
+    const isOptionLocked = modalContent.includes('come back later') || modalContent.includes('46h before expiry');
 
-      if (!hours60) return { found: false, isLocked: true, reason: '未找到 60 hours 选项' };
+    console.log(`📋 第三个选项 [60 hours] 状态: 是否受限/不可选=${isOptionLocked}`);
 
-      // 向上寻找第三个选项的外层卡片
-      let card = hours60;
-      for (let i = 0; i < 6; i++) {
-        if (card.parentElement && (
-          card.parentElement.getAttribute('role') === 'button' ||
-          card.parentElement.tagName === 'BUTTON' ||
-          card.parentElement.className.includes('rounded')
-        )) {
-          card = card.parentElement;
-          if (card.tagName === 'BUTTON' || card.getAttribute('role') === 'button') break;
-        }
-      }
-
-      const cardText = (card.innerText || '').toLowerCase();
-      const style = window.getComputedStyle(card);
-
-      // 判断是否包含冷却/锁定提示或不可交互样式
-      const isLocked = cardText.includes('come back later') ||
-                       cardText.includes('before expiry') ||
-                       card.hasAttribute('disabled') ||
-                       card.getAttribute('aria-disabled') === 'true' ||
-                       style.pointerEvents === 'none' ||
-                       style.cursor === 'not-allowed' ||
-                       card.className.includes('cursor-not-allowed') ||
-                       card.className.includes('opacity-50');
-
-      return {
-        found: true,
-        isLocked: isLocked,
-        cardText: card.innerText
-      };
-    });
-
-    console.log(`📋 第三个选项 [60 hours] 状态: 找到=${option3Status.found}, 是否锁定/不可选=${option3Status.isLocked}`);
-
-    // ⚠️ 如果当前仍处于锁定/不可选状态（如剩余时间多于 46 小时），正常退出并汇报
-    if (option3Status.isLocked) {
-      const notTimeMsg = `⏳ <b>Freemchost 尚未到续期开放时间</b>\n\n📌 当前服务器剩余时间: <b>${currentExpiryTime}</b>\n💡 第三个选项 (60 hours) 当前不可选（需在到期前 46 小时内开放）。脚本将按定时任务持续自动检测。`;
-      console.log('⚠️️ ' + notTimeMsg.replace(/<[^>]+>/g, ''));
+    // ⚠️ 如果当前未开放（例如还剩 91 小时，尚未到达 46 小时开放窗口）
+    if (isOptionLocked) {
+      const notTimeMsg = `⏳ <b>Freemchost 尚未到续期开放时间</b>\n\n📌 当前服务器剩余时间: <b>${currentExpiryTime}</b>\n💡 第三个选项 (60 hours) 需在到期前 46 小时内开放（当前状态: 锁定不可选）。脚本将按定时任务持续监测。`;
+      console.log('⚠️ ' + notTimeMsg.replace(/<[^>]+>/g, ''));
       await page.screenshot({ path: 'screenshots/renew_locked.png' });
       await sendTelegramMessage(tgToken, tgChatId, notTimeMsg);
+
+      // 关闭弹窗并优雅结束
+      await page.keyboard.press('Escape').catch(() => {});
       await browser.close();
-      return; // 正常退出，Exit 0，不触发 GitHub Action 报红
+      console.log('🏁 任务正常结束（未到期无需操作）。');
+      return; // Exit code 0，不报错报红
     }
 
-    // 🎯 可以续期状态：点击第三个选项
-    console.log('🎉 检测到第三个选项已开放！正在点击 [60 hours] 续期...');
-    await page.evaluate(() => {
-      const all = Array.from(document.querySelectorAll('*'));
-      const hours60 = all.find(el => (el.textContent || '').trim().toLowerCase() === '60 hours' || ((el.textContent || '').includes('60 hours') && el.children.length === 0));
-      if (hours60) {
-        const btn = hours60.closest('button') || hours60.closest('[role="button"]') || hours60.closest('div[class*="rounded"]') || hours60;
-        btn.click();
-      }
-    });
+    // 🎯 已到开放时间：点击第三个选项 [60 hours]
+    console.log('🎉 检测到第三个选项已开放！正在点击 [60 hours] 进行续期...');
+    const option60Card = renewDialog.locator('*').filter({ hasText: /60\s*hours/i }).last();
+    await option60Card.click({ force: true });
 
-    // 检查是否有二级确认按钮（如 Confirm / Renew）
-    const confirmBtn = page.locator('button:visible').filter({ hasText: /^(confirm|renew|continue)$/i }).first();
+    // 检查是否有确认按钮
+    const confirmBtn = renewDialog.locator('button').filter({ hasText: /^(confirm|renew|continue)$/i }).first();
     if (await confirmBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-      console.log('👉 触发二级确认按钮...');
+      console.log('👉 触发确认按钮...');
       await confirmBtn.click();
     }
 
-    console.log('⏳ 等待平台完成续期操作...');
+    console.log('⏳ 等待平台处理续期请求...');
     await page.waitForTimeout(6000);
 
-    // 刷新页面以确保获取最新的数据库倒计时
+    // 刷新页面重新读取最新剩余时间
     console.log('🔄 正在刷新页面读取最新剩余时间...');
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForTimeout(2000);
-    await enableAutoPopupKiller(page);
+    await safelyDismissUnwantedPopups(page);
 
-    // 重新切到 Billing 选项卡
-    const tabAgain = page.locator('button[role="tab"]').filter({ hasText: /billing/i }).first();
-    await tabAgain.click({ force: true }).catch(() => {});
+    // 重新切到 Billing 标签读取时间
+    const billingTabAgain = page.locator('button[role="tab"]').filter({ hasText: /billing/i }).first();
+    await billingTabAgain.click({ force: true }).catch(() => {});
     await page.waitForTimeout(2000);
 
     // 🕒 读取续期后的新剩余时间
@@ -349,9 +280,9 @@ function parseTimeToHours(timeStr) {
 
     await page.screenshot({ path: 'screenshots/renew_result.png', fullPage: true });
 
-    // 校验剩余时间是否延长
+    // 校验续期是否生效
     if (afterHours <= beforeHours && afterHours !== 0) {
-      throw new Error(`续期请求已提交，但剩余时间未发生变化 (仍为: ${updatedExpiryTime})，可能平台延迟或存在风控。`);
+      throw new Error(`续期操作已执行，但剩余时间未增加 (仍为: ${updatedExpiryTime})。可能存在风控或平台延迟。`);
     }
 
     const successMsg = `🎉 <b>Freemchost 服务器已成功续期！</b>\n\n📌 续期前剩余时间: <b>${currentExpiryTime}</b>\n📌 续期后最新时间: <b>${updatedExpiryTime}</b>`;
