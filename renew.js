@@ -233,10 +233,11 @@ function parseTimeToHours(timeStr) {
 
     console.log(`📋 第三个选项 [60 hours] 状态: 是否受限/不可选=${isOptionLocked}`);
 
-    // ⚠️ 如果当前未开放（例如还剩 91 小时，尚未到达 46 小时开放窗口）
+    // ⚠️ 如果当前未开放续期（仍处于冷却/未到 46 小时窗口）
     if (isOptionLocked) {
-      const notTimeMsg = `⏳ <b>Freemchost 尚未到续期开放时间</b>\n\n📌 当前服务器剩余时间: <b>${currentExpiryTime}</b>\n💡 第三个选项 (60 hours) 需在到期前 46 小时内开放（当前状态: 锁定不可选）。脚本将按定时任务持续监测。`;
-      console.log('⚠️ ' + notTimeMsg.replace(/<[^>]+>/g, ''));
+      const notTimeMsg = `💗主人，未到续期时间，无须续期。\n\n⏳ <b>Freemchost 状态提醒</b>\n━━━━━━━━━━━━━━━\n📌 <b>当前剩余时间：</b>${currentExpiryTime}\n💡 <b>规则提示：</b>免费 60 hours 需在到期前 46 小时内开放\n🤖 <b>巡检状态：</b>锁定保护中，定时任务持续自动监测`;
+      
+      console.log('ℹ️ ' + notTimeMsg.replace(/<[^>]+>/g, ''));
       await page.screenshot({ path: 'screenshots/renew_locked.png' });
       await sendTelegramMessage(tgToken, tgChatId, notTimeMsg);
 
@@ -244,7 +245,7 @@ function parseTimeToHours(timeStr) {
       await page.keyboard.press('Escape').catch(() => {});
       await browser.close();
       console.log('🏁 任务正常结束（未到期无需操作）。');
-      return; // Exit code 0，不报错报红
+      return; // Exit code 0，不报错
     }
 
     // 🎯 已到开放时间：点击第三个选项 [60 hours]
@@ -285,14 +286,18 @@ function parseTimeToHours(timeStr) {
       throw new Error(`续期操作已执行，但剩余时间未增加 (仍为: ${updatedExpiryTime})。可能存在风控或平台延迟。`);
     }
 
-    const successMsg = `🎉 <b>Freemchost 服务器已成功续期！</b>\n\n📌 续期前剩余时间: <b>${currentExpiryTime}</b>\n📌 续期后最新时间: <b>${updatedExpiryTime}</b>`;
+    // 续期成功消息
+    const successMsg = `🎉 <b>💗主人，Freemchost 服务器续期成功！</b>\n\n━━━━━━━━━━━━━━━\n📌 <b>续期前剩余时间：</b>${currentExpiryTime}\n✨ <b>续期后剩余时间：</b>${updatedExpiryTime}\n━━━━━━━━━━━━━━━\n💗 服务器已成功延期，请主人放心使用！`;
+    
     console.log('✅ ' + successMsg.replace(/<[^>]+>/g, ''));
     await sendTelegramMessage(tgToken, tgChatId, successMsg);
 
   } catch (error) {
     console.error('❌ 执行过程中出错:', error.message);
     await page.screenshot({ path: 'screenshots/renew_error.png', fullPage: true });
-    await sendTelegramMessage(tgToken, tgChatId, `⚠️ Freemchost 续期失败: ${error.message}`);
+    
+    const errorMsg = `⚠️ <b>Freemchost 续期任务异常</b>\n\n━━━━━━━━━━━━━━━\n❌ <b>失败原因：</b><code>${error.message}</code>\n📌 请主人检查 GitHub Actions 截图排查。`;
+    await sendTelegramMessage(tgToken, tgChatId, errorMsg);
     process.exitCode = 1;
   } finally {
     await browser.close();
