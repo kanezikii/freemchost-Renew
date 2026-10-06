@@ -21,34 +21,38 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-// 🛡️ 深度清理所有评分、反馈弹窗和半透明遮罩层（支持多层连环弹窗）
+// 🛡️ 深度清理所有弹窗、Cookie 协议横幅及半透明遮罩
 async function closeAllModals(page) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    // 1. 发送 ESC 键盘事件尝试原生关闭
-    await page.keyboard.press('Escape').catch(() => {});
-    await page.waitForTimeout(300);
+  // 1. 处理底部 Cookie 授权横幅
+  try {
+    const cookieBtn = page.locator('button').filter({ hasText: /^(accept all|reject all)$/i }).first();
+    if (await cookieBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await cookieBtn.click({ force: true });
+      await page.waitForTimeout(300);
+    }
+  } catch (e) {}
 
-    // 2. 点击所有当前“真正可见”的 Maybe later 按钮
-    const visibleMaybeLater = page.locator(':is(button, a, div[role="button"], span):visible').filter({ hasText: /maybe later/i });
-    const count = await visibleMaybeLater.count().catch(() => 0);
+  // 2. 清理多层评分与反馈弹窗
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await page.keyboard.press('Escape').catch(() => {});
+
+    const maybeLater = page.locator(':is(button, a, div[role="button"]):visible').filter({ hasText: /maybe later/i });
+    const count = await maybeLater.count().catch(() => 0);
     for (let i = 0; i < count; i++) {
-      await visibleMaybeLater.nth(i).click({ force: true }).catch(() => {});
-      await page.waitForTimeout(400);
+      await maybeLater.nth(i).click({ force: true }).catch(() => {});
     }
 
-    // 3. 点击弹窗右上角的 [×] 或 close 按钮
     await page.evaluate(() => {
+      // 点击右上角 ×
       document.querySelectorAll('button, svg, [role="button"]').forEach(el => {
         const txt = (el.textContent || '').trim();
         const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-        if (txt === '×' || txt === '✕' || txt === 'x' || aria.includes('close')) {
+        if (['×', '✕', 'x'].includes(txt) || aria.includes('close')) {
           try { el.click(); } catch (e) {}
         }
       });
-    });
 
-    // 4. DOM 级兜底：强力移除阻挡点击的 Modal 和 Backdrop 遮罩层
-    await page.evaluate(() => {
+      // 强力卸载阻挡点击的遮罩 DOM
       const overlays = document.querySelectorAll('[role="dialog"], div.fixed.inset-0, div[class*="backdrop"]');
       overlays.forEach(el => {
         const txt = el.innerText || '';
@@ -59,12 +63,11 @@ async function closeAllModals(page) {
       document.body.style.overflow = 'auto';
       document.body.style.pointerEvents = 'auto';
     });
-
     await page.waitForTimeout(300);
   }
 }
 
-// 🕒 精准提取剩余时间 (如: 01天 16小时 30分钟)
+// 🕒 精准提取剩余时间 (如: 01天 07小时 56分钟)
 async function getExpiryTimeText(page) {
   try {
     const result = await page.evaluate(() => {
@@ -202,46 +205,35 @@ function parseTimeToHours(timeStr) {
     }
 
     console.log('📌 正在切换至 [PLAN / Billing] 选项卡...');
-    let onBillingTab = false;
+    
+    // 精准锁定 Radix UI 选项卡 Button 元素（匹配 role="tab" 且包含 billing 或 id 含有 trigger-billing）
+    const billingTabLocator = page.locator('button[role="tab"]').filter({ hasText: /billing/i }).first();
+    await billingTabLocator.waitFor({ state: 'attached', timeout: 15000 });
 
-    for (let retry = 1; retry <= 4; retry++) {
+    for (let retry = 1; retry <= 3; retry++) {
       await closeAllModals(page);
 
-      // 定位顶部 Tab 栏中的 Billing 选项卡（排除左侧栏和隐藏节点）
+      // 双重触发：Playwright 原生点击 + evaluate 原生 JS 点击
+      await billingTabLocator.click({ force: true }).catch(() => {});
       await page.evaluate(() => {
-        const elements = Array.from(document.querySelectorAll('*'));
-        for (const el of elements) {
-          const txt = (el.innerText || '').trim();
-          if (txt === 'Billing' || txt.includes('PLAN\nBilling')) {
-            const rect = el.getBoundingClientRect();
-            // 选项卡位于顶部区域 (top 介于 50px 与 350px 之间)
-            if (rect.width > 0 && rect.height > 0 && rect.top > 50 && rect.top < 350) {
-              el.click();
-              return;
-            }
-          }
-        }
+        const tab = document.querySelector('button[role="tab"][id*="trigger-billing"], button[role="tab"][aria-controls*="billing"]');
+        if (tab) tab.click();
       });
 
-      await page.waitForTimeout(2000);
-      await closeAllModals(page);
+      // 验证是否已成功激活 Billing 视图 (检测页面中出现 "TIME UNTIL EXPIRY" 或 "Plan & lifecycle")
+      const isActivated = await page.waitForFunction(() => {
+        const text = document.body.innerText || '';
+        return text.includes('TIME UNTIL EXPIRY') || text.includes('Plan & lifecycle');
+      }, { timeout: 3500 }).then(() => true).catch(() => false);
 
-      // 验证是否成功渲染 Billing 面板关键内容
-      onBillingTab = await page.evaluate(() => {
-        const txt = document.body.innerText || '';
-        return txt.includes('TIME UNTIL EXPIRY') || txt.includes('Renew now') || txt.includes('before expiry');
-      });
-
-      if (onBillingTab) {
+      if (isActivated) {
         console.log('✅ 已成功激活 [PLAN / Billing] 面板！');
         break;
       }
-      console.log(`⏳ 第 ${retry} 次尝试切换 Billing 选项卡...`);
+      console.log(`⏳ 第 ${retry} 次尝试激活 Billing 面板...`);
     }
 
-    if (!onBillingTab) {
-      throw new Error('未能成功切换到 Billing 选项卡，页面内容未更新。');
-    }
+    await page.waitForTimeout(1500);
 
     // 🕒 获取并计算续期前的时间
     const currentExpiryTime = await getExpiryTimeText(page);
@@ -263,7 +255,7 @@ function parseTimeToHours(timeStr) {
     }
 
     console.log('🔄 正在寻找并点击红色 [Renew now] 按钮...');
-    const renewBtn = page.getByText('Renew now', { exact: false }).first();
+    const renewBtn = page.getByRole('button', { name: /Renew now/i }).first();
     await renewBtn.waitFor({ state: 'visible', timeout: 15000 });
     await renewBtn.click({ force: true });
     console.log('👉 已点击 [Renew now] 按钮！');
