@@ -21,33 +21,47 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-// 🛡️ 深度清理所有评分弹窗、确认提示和遮罩层
-async function dismissAllPopups(page) {
-  try {
-    // 1. 优先尝试点击评分弹窗的 "Maybe later" 按钮
-    const maybeLater = page.locator('text=/maybe later/i').first();
-    if (await maybeLater.isVisible({ timeout: 1500 }).catch(() => false)) {
-      console.log('👉 关闭评价弹窗 [Maybe later]...');
-      await maybeLater.click({ force: true });
-      await page.waitForTimeout(500);
+// 🛡️ 深度清理所有评分、反馈弹窗和半透明遮罩层（支持多层连环弹窗）
+async function closeAllModals(page) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // 1. 发送 ESC 键盘事件尝试原生关闭
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(300);
+
+    // 2. 点击所有当前“真正可见”的 Maybe later 按钮
+    const visibleMaybeLater = page.locator(':is(button, a, div[role="button"], span):visible').filter({ hasText: /maybe later/i });
+    const count = await visibleMaybeLater.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      await visibleMaybeLater.nth(i).click({ force: true }).catch(() => {});
+      await page.waitForTimeout(400);
     }
 
-    // 2. DOM 注入清理所有常见遮罩按钮 (×, close, reject 等)
+    // 3. 点击弹窗右上角的 [×] 或 close 按钮
     await page.evaluate(() => {
-      const clickables = Array.from(document.querySelectorAll('button, a, div[role="button"], span, svg'));
-      for (const el of clickables) {
-        const txt = (el.textContent || '').trim().toLowerCase();
+      document.querySelectorAll('button, svg, [role="button"]').forEach(el => {
+        const txt = (el.textContent || '').trim();
         const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-        if (
-          ['maybe later', 'close', 'reject all', 'accept all', '×', '✕', 'x'].includes(txt) ||
-          aria.includes('close')
-        ) {
+        if (txt === '×' || txt === '✕' || txt === 'x' || aria.includes('close')) {
           try { el.click(); } catch (e) {}
         }
-      }
+      });
     });
-  } catch (e) {}
-  await page.waitForTimeout(800);
+
+    // 4. DOM 级兜底：强力移除阻挡点击的 Modal 和 Backdrop 遮罩层
+    await page.evaluate(() => {
+      const overlays = document.querySelectorAll('[role="dialog"], div.fixed.inset-0, div[class*="backdrop"]');
+      overlays.forEach(el => {
+        const txt = el.innerText || '';
+        if (txt.includes('FreeMCHost') || txt.includes('idea') || txt.includes('rate') || txt.includes('feedback')) {
+          el.remove();
+        }
+      });
+      document.body.style.overflow = 'auto';
+      document.body.style.pointerEvents = 'auto';
+    });
+
+    await page.waitForTimeout(300);
+  }
 }
 
 // 🕒 精准提取剩余时间 (如: 01天 16小时 30分钟)
@@ -175,55 +189,66 @@ function parseTimeToHours(timeStr) {
     }
 
     await page.waitForTimeout(2500);
-    await dismissAllPopups(page);
+    await closeAllModals(page);
 
-    // 检查是否有配置更新需要点击
+    // 检查配置更新卡片
     const updateOfferBtn = page.getByRole('button', { name: /Update to current offer/i }).first();
     if (await updateOfferBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
       console.log('⚡ 检测到配置需要更新，正在点击 [Update to current offer]...');
       await updateOfferBtn.click();
       await page.waitForLoadState('networkidle');
       await page.waitForTimeout(3000);
-      // 更新后再次清除可能出现的评价弹窗
-      await dismissAllPopups(page);
+      await closeAllModals(page);
     }
 
-    // 再次确认关闭评价弹窗
-    await dismissAllPopups(page);
+    console.log('📌 正在切换至 [PLAN / Billing] 选项卡...');
+    let onBillingTab = false;
 
-    console.log('📌 正在点击 [PLAN / Billing] 选项卡...');
-    // 使用 evaluate 直接定位页面上实际可见（带尺寸）的 Billing 选项卡并触发原生点击
-    const tabClicked = await page.evaluate(() => {
-      const candidates = Array.from(document.querySelectorAll('button, a, div[role="tab"]'));
-      for (const el of candidates) {
-        if (/billing/i.test(el.innerText || '')) {
-          const rect = el.getBoundingClientRect();
-          const style = window.getComputedStyle(el);
-          if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
-            el.click();
-            return true;
+    for (let retry = 1; retry <= 4; retry++) {
+      await closeAllModals(page);
+
+      // 定位顶部 Tab 栏中的 Billing 选项卡（排除左侧栏和隐藏节点）
+      await page.evaluate(() => {
+        const elements = Array.from(document.querySelectorAll('*'));
+        for (const el of elements) {
+          const txt = (el.innerText || '').trim();
+          if (txt === 'Billing' || txt.includes('PLAN\nBilling')) {
+            const rect = el.getBoundingClientRect();
+            // 选项卡位于顶部区域 (top 介于 50px 与 350px 之间)
+            if (rect.width > 0 && rect.height > 0 && rect.top > 50 && rect.top < 350) {
+              el.click();
+              return;
+            }
           }
         }
-      }
-      return false;
-    });
+      });
 
-    if (!tabClicked) {
-      // 备用兜底定位器（必须是可见元素）
-      const fallbackTab = page.locator(':is(button, a, div[role="tab"]):visible').filter({ hasText: /Billing/i }).first();
-      await fallbackTab.waitFor({ state: 'visible', timeout: 15000 });
-      await fallbackTab.click({ force: true });
+      await page.waitForTimeout(2000);
+      await closeAllModals(page);
+
+      // 验证是否成功渲染 Billing 面板关键内容
+      onBillingTab = await page.evaluate(() => {
+        const txt = document.body.innerText || '';
+        return txt.includes('TIME UNTIL EXPIRY') || txt.includes('Renew now') || txt.includes('before expiry');
+      });
+
+      if (onBillingTab) {
+        console.log('✅ 已成功激活 [PLAN / Billing] 面板！');
+        break;
+      }
+      console.log(`⏳ 第 ${retry} 次尝试切换 Billing 选项卡...`);
     }
 
-    await page.waitForTimeout(2000);
-    await dismissAllPopups(page);
+    if (!onBillingTab) {
+      throw new Error('未能成功切换到 Billing 选项卡，页面内容未更新。');
+    }
 
     // 🕒 获取并计算续期前的时间
     const currentExpiryTime = await getExpiryTimeText(page);
     const beforeHours = parseTimeToHours(currentExpiryTime);
     console.log(`📌 抓取到的当前服务器剩余时间: ${currentExpiryTime} (约 ${beforeHours} 小时)`);
 
-    // 检测是否根本还没到开放续期时间
+    // 检测是否未到续期时间
     const isLocked = await page.evaluate(() => {
       const txt = document.body.innerText || '';
       return txt.includes('46h before expiry') || txt.includes('come back later');
@@ -243,13 +268,12 @@ function parseTimeToHours(timeStr) {
     await renewBtn.click({ force: true });
     console.log('👉 已点击 [Renew now] 按钮！');
 
-    await page.waitForTimeout(3000); // 等待弹窗彻底加载
+    await page.waitForTimeout(3000);
 
     console.log('📋 正在寻找并强制点击 [60 hours] 续期选项...');
     const hours60Option = page.locator('text=/60 hours/i').first();
     await hours60Option.waitFor({ state: 'visible', timeout: 10000 });
     
-    // 强制使用原生 JS 向上查找到真正的 Button 进行点击，避免被透明层拦截
     await hours60Option.evaluate(el => {
       const btn = el.closest('button') || el.closest('div[role="button"]') || el;
       btn.click();
