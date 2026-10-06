@@ -354,7 +354,7 @@ function parseTimeToHours(timeStr) {
       throw new Error(`平台处理完毕后剩余时间未见增加 (原: ${currentExpiryTime}, 现: ${updatedExpiryTime})，可能点击未触发或需手动确认。`);
     }
 
-    const successMsg = `🎉 <b>Freemchost 服务器已成功续期！</b>\n\n📌 续期前剩余时间: <b>${currentExpiryTime}</b>\n📌 续期后剩余时间: <b>${updatedExpiryTime}</b>`;
+    const successMsg = `🎉 <b>💗主人，Freemchost 服务器已成功续期！</b>\n\n📌 续期前剩余时间: <b>${currentExpiryTime}</b>\n📌 续期后剩余时间: <b>${updatedExpiryTime}</b>`;
     console.log('✅ ' + successMsg.replace(/<[^>]+>/g, ''));
     await sendTelegramMessage(tgToken, tgChatId, successMsg);
 
