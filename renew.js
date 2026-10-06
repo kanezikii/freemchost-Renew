@@ -21,29 +21,33 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-// 🛡️ 出现弹窗时点击 [×] 或跳过/接受按钮
-async function dismissPopupsIfPresent(page) {
+// 🛡️ 深度清理所有评分弹窗、确认提示和遮罩层
+async function dismissAllPopups(page) {
   try {
-    await page.evaluate(() => {
-      const allElements = Array.from(document.querySelectorAll('button, svg, span, div, a'));
-      allElements.forEach(el => {
-        const txt = (el.textContent || '').trim();
-        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-        if (txt === '×' || txt === '✕' || txt === 'x' || aria.includes('close')) {
-          try { el.click(); } catch(e) {}
-        }
-      });
+    // 1. 优先尝试点击评分弹窗的 "Maybe later" 按钮
+    const maybeLater = page.locator('text=/maybe later/i').first();
+    if (await maybeLater.isVisible({ timeout: 1500 }).catch(() => false)) {
+      console.log('👉 关闭评价弹窗 [Maybe later]...');
+      await maybeLater.click({ force: true });
+      await page.waitForTimeout(500);
+    }
 
-      const actionBtns = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
-      actionBtns.forEach(el => {
+    // 2. DOM 注入清理所有常见遮罩按钮 (×, close, reject 等)
+    await page.evaluate(() => {
+      const clickables = Array.from(document.querySelectorAll('button, a, div[role="button"], span, svg'));
+      for (const el of clickables) {
         const txt = (el.textContent || '').trim().toLowerCase();
-        if (['maybe later', 'close', 'reject all', 'accept all'].includes(txt)) {
-          try { el.click(); } catch(e) {}
+        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+        if (
+          ['maybe later', 'close', 'reject all', 'accept all', '×', '✕', 'x'].includes(txt) ||
+          aria.includes('close')
+        ) {
+          try { el.click(); } catch (e) {}
         }
-      });
+      }
     });
   } catch (e) {}
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(800);
 }
 
 // 🕒 精准提取剩余时间 (如: 01天 16小时 30分钟)
@@ -89,7 +93,7 @@ async function getExpiryTimeText(page) {
   }
 }
 
-// 🧮 将时间字符串转换为总小时数，用于严格的数学校验
+// 🧮 将时间字符串转换为总小时数
 function parseTimeToHours(timeStr) {
   if (!timeStr || timeStr === '未知') return 0;
   let totalHours = 0;
@@ -170,38 +174,49 @@ function parseTimeToHours(timeStr) {
       }
     }
 
-await page.waitForTimeout(2000);
-await dismissPopupsIfPresent(page);
+    await page.waitForTimeout(2500);
+    await dismissAllPopups(page);
 
-// 1. 自动处理延迟弹出的评价弹窗
-const maybeLaterBtn = page.getByText('Maybe later', { exact: false }).first();
-if (await maybeLaterBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-  console.log('👉 关闭评价弹窗 [Maybe later]...');
-  await maybeLaterBtn.click();
-  await page.waitForTimeout(1000);
-}
+    // 检查是否有配置更新需要点击
+    const updateOfferBtn = page.getByRole('button', { name: /Update to current offer/i }).first();
+    if (await updateOfferBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+      console.log('⚡ 检测到配置需要更新，正在点击 [Update to current offer]...');
+      await updateOfferBtn.click();
+      await page.waitForLoadState('networkidle');
+      await page.waitForTimeout(3000);
+      // 更新后再次清除可能出现的评价弹窗
+      await dismissAllPopups(page);
+    }
 
-// 2. 自动处理配置更新锁定 (Offer update available)
-const updateOfferBtn = page.getByRole('button', { name: /Update to current offer/i }).first();
-if (await updateOfferBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-  console.log('⚡ 检测到配置需要更新，正在点击 [Update to current offer]...');
-  await updateOfferBtn.click();
-  await page.waitForLoadState('networkidle');
-  await page.waitForTimeout(3000);
-}
+    // 再次确认关闭评价弹窗
+    await dismissAllPopups(page);
 
-// 3. 严格匹配“可见”的 Billing 标签，避免命中隐藏的响应式节点
-console.log('📌 正在点击 [PLAN / Billing] 选项卡...');
-const billingTab = page.locator('button, a, div[role="tab"], span')
-  .filter({ hasText: /^Billing$/i })
-  .locator('visible=true')
-  .first();
+    console.log('📌 正在点击 [PLAN / Billing] 选项卡...');
+    // 使用 evaluate 直接定位页面上实际可见（带尺寸）的 Billing 选项卡并触发原生点击
+    const tabClicked = await page.evaluate(() => {
+      const candidates = Array.from(document.querySelectorAll('button, a, div[role="tab"]'));
+      for (const el of candidates) {
+        if (/billing/i.test(el.innerText || '')) {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
+            el.click();
+            return true;
+          }
+        }
+      }
+      return false;
+    });
 
-await billingTab.waitFor({ state: 'visible', timeout: 15000 });
-await billingTab.click();
-await page.waitForTimeout(1500);
+    if (!tabClicked) {
+      // 备用兜底定位器（必须是可见元素）
+      const fallbackTab = page.locator(':is(button, a, div[role="tab"]):visible').filter({ hasText: /Billing/i }).first();
+      await fallbackTab.waitFor({ state: 'visible', timeout: 15000 });
+      await fallbackTab.click({ force: true });
+    }
 
-    await dismissPopupsIfPresent(page);
+    await page.waitForTimeout(2000);
+    await dismissAllPopups(page);
 
     // 🕒 获取并计算续期前的时间
     const currentExpiryTime = await getExpiryTimeText(page);
@@ -228,7 +243,7 @@ await page.waitForTimeout(1500);
     await renewBtn.click({ force: true });
     console.log('👉 已点击 [Renew now] 按钮！');
 
-    await page.waitForTimeout(3000); // 必须等待弹窗彻底加载
+    await page.waitForTimeout(3000); // 等待弹窗彻底加载
 
     console.log('📋 正在寻找并强制点击 [60 hours] 续期选项...');
     const hours60Option = page.locator('text=/60 hours/i').first();
@@ -241,7 +256,6 @@ await page.waitForTimeout(1500);
     });
     console.log('👉 已触发 [60 hours] 点击事件！');
 
-    // 等待足够长的时间让 API 请求发送且前端 DOM 刷新
     console.log('⏳ 等待平台处理续期请求...');
     await page.waitForTimeout(8000); 
 
@@ -252,7 +266,6 @@ await page.waitForTimeout(1500);
 
     await page.screenshot({ path: 'screenshots/renew_result.png', fullPage: true });
 
-    // 严格判断：如果续期后的总小时数没有增加（或者等于0），判定为失败
     if (afterHours <= beforeHours || afterHours === 0) {
       throw new Error(`平台未响应续期请求，剩余时间未发生改变 (仍为 ${updatedExpiryTime})。可能按钮点击未生效或存在风控。`);
     }
