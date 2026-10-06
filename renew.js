@@ -170,14 +170,36 @@ function parseTimeToHours(timeStr) {
       }
     }
 
-    await page.waitForTimeout(2000);
-    await dismissPopupsIfPresent(page);
+await page.waitForTimeout(2000);
+await dismissPopupsIfPresent(page);
 
-    console.log('📌 正在点击 [PLAN / Billing] 选项卡...');
-    const billingTab = page.getByText('Billing', { exact: false }).first();
-    await billingTab.waitFor({ state: 'visible', timeout: 15000 });
-    await billingTab.click();
-    await page.waitForTimeout(1500);
+// 1. 自动处理延迟弹出的评价弹窗
+const maybeLaterBtn = page.getByText('Maybe later', { exact: false }).first();
+if (await maybeLaterBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+  console.log('👉 关闭评价弹窗 [Maybe later]...');
+  await maybeLaterBtn.click();
+  await page.waitForTimeout(1000);
+}
+
+// 2. 自动处理配置更新锁定 (Offer update available)
+const updateOfferBtn = page.getByRole('button', { name: /Update to current offer/i }).first();
+if (await updateOfferBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+  console.log('⚡ 检测到配置需要更新，正在点击 [Update to current offer]...');
+  await updateOfferBtn.click();
+  await page.waitForLoadState('networkidle');
+  await page.waitForTimeout(3000);
+}
+
+// 3. 严格匹配“可见”的 Billing 标签，避免命中隐藏的响应式节点
+console.log('📌 正在点击 [PLAN / Billing] 选项卡...');
+const billingTab = page.locator('button, a, div[role="tab"], span')
+  .filter({ hasText: /^Billing$/i })
+  .locator('visible=true')
+  .first();
+
+await billingTab.waitFor({ state: 'visible', timeout: 15000 });
+await billingTab.click();
+await page.waitForTimeout(1500);
 
     await dismissPopupsIfPresent(page);
 
